@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Image Animator with Text, Voice & MP4 Export</title>
+<style>
+  body { font-family: system-ui, -apple-system, Roboto, "Segoe UI", Arial; margin:16px; background:#f6f7fb; color:#111;}
+  .container { max-width:900px; margin:0 auto; }
+  canvas { background:#222; display:block; margin:12px 0; width:100%; max-width:720px; height:auto; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,0.12);}
+  label { display:block; margin-top:8px; }
+  .controls { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
+  input[type="range"] { width:160px; }
+  button { padding:8px 12px; border:0; background:#2b7cff; color:white; border-radius:6px; cursor:pointer; }
+  button.secondary { background:#6b7280; }
+  textarea { width:100%; height:60px; margin-top:8px; }
+  small { color:#5b6470; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Image Animator → MP4</h1>
+  <p>Upload an image, add text, narration, animate, and export directly as MP4 for YouTube Shorts.</p>
+
+  <label>Choose image:
+    <input id="file" type="file" accept="image/*">
+  </label>
+
+  <label>Enter caption / narration text:
+    <textarea id="caption">Hello world! This is my animated short.</textarea>
+  </label>
+
+  <div class="controls">
+    <label>Animation:
+      <select id="animType">
+        <option value="kenburns">Ken Burns (pan &amp; zoom)</option>
+        <option value="panLR">Pan Left → Right</option>
+        <option value="rotate">Rotate</option>
+        <option value="wiggle">Wiggle</option>
+      </select>
+    </label>
+
+    <label>Duration (s):
+      <input id="duration" type="number" min="1" max="20" value="6" step="1">
+    </label>
+
+    <label>FPS:
+      <input id="fps" type="number" min="8" max="60" value="30" step="1">
+    </label>
+
+    <label>Scale:
+      <input id="scale" type="range" min="0.5" max="2" step="0.01" value="1">
+      <small id="scaleVal">1.00</small>
+    </label>
+  </div>
+
+  <canvas id="c" width="720" height="1280"></canvas>
+
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <button id="previewBtn">Preview</button>
+    <button id="exportBtn">Export MP4</button>
+    <button id="stopBtn" class="secondary" disabled>Stop</button>
+    <button id="resetBtn" class="secondary">Reset</button>
+  </div>
+
+  <p><small>Conversion may take 10–30s depending on video length. Runs fully in your browser.</small></p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.6/dist/ffmpeg.min.js"></script>
+<script>
+(() => {
+  const { createFFmpeg, fetchFile } = FFmpeg;
+  const ffmpeg = createFFmpeg({ log: true });
+
+  const fileEl=document.getElementById('file');
+  const canvas=document.getElementById('c');
+  const ctx=canvas.getContext('2d');
+  const animType=document.getElementById('animType');
+  const durationEl=document.getElementById('duration');
+  const fpsEl=document.getElementById('fps');
+  const previewBtn=document.getElementById('previewBtn');
+  const exportBtn=document.getElementById('exportBtn');
+  const stopBtn=document.getElementById('stopBtn');
+  const resetBtn=document.getElementById('resetBtn');
+  const scaleEl=document.getElementById('scale');
+  const scaleVal=document.getElementById('scaleVal');
+  const captionEl=document.getElementById('caption');
+
+  let img=null, rafId=null, startTime=null, previewPlaying=false;
+
+  scaleEl.addEventListener('input',()=>{ scaleVal.textContent=parseFloat(scaleEl.value).toFixed(2); });
+
+  fileEl.addEventListener('change',e=>{
+    const f=e.target.files && e.target.files[0]; if(!f) return;
+    const url=URL.createObjectURL(f); const i=new Image();
+    i.onload=()=>{ img=i; drawStatic(); URL.revokeObjectURL(url); };
+    i.src=url;
+  });
+
+  function drawStatic(){
+    ctx.fillStyle='#111'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    if(!img) return;
+    const cw=canvas.width,ch=canvas.height,iw=img.width,ih=img.height;
+    const scale=Math.min(cw/iw,ch/ih)*parseFloat(scaleEl.value);
+    const w=iw*scale,h=ih*scale,x=(cw-w)/2,y=(ch-h)/2;
+    ctx.drawImage(img,x,y,w,h);
+    drawCaption();
+  }
+
+  function drawCaption(){
+    const txt=captionEl.value.trim(); if(!txt) return;
+    ctx.font="bold 40px sans-serif";
+    ctx.fillStyle="white";
+    ctx.textAlign="center";
+    ctx.strokeStyle="black";
+    ctx.lineWidth=6;
+    ctx.strokeText(txt,canvas.width/2,canvas.height-60);
+    ctx.fillText(txt,canvas.width/2,canvas.height-60);
+  }
+
+  function easeInOutQuad(x){return x<0.5?2*x*x:1-Math.pow(-2*x+2,2)/2;}
+
+  function drawFrame(t){
+    ctx.fillStyle='#111'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    if(!img) return;
+    const cw=canvas.width,ch=canvas.height,iw=img.width,ih=img.height;
+    const baseScale=Math.min(cw/iw,ch/ih)*parseFloat(scaleEl.value);
+
+    if(animType.value==='kenburns'){
+      const s=baseScale*(1+0.15*easeInOutQuad(t));
+      const panX=(cw-iw*s)*0.3*easeInOutQuad(t);
+      const panY=(ch-ih*s)*0.3*easeInOutQuad(t);
+      ctx.drawImage(img,panX,panY,iw*s,ih*s);
+    } else if(animType.value==='panLR'){
+      const s=baseScale,w=iw*s,h=ih*s;
+      const x=(cw-w)/2+(cw*0.4)*(t-0.5), y=(ch-h)/2;
+      ctx.drawImage(img,x,y,w,h);
+    } else if(animType.value==='rotate'){
+      const s=baseScale,w=iw*s,h=ih*s,cx=cw/2,cy=ch/2,angle=t*2*Math.PI*0.1;
+      ctx.save(); ctx.translate(cx,cy); ctx.rotate(angle-Math.PI*0.05);
+      ctx.drawImage(img,-w/2,-h/2,w,h); ctx.restore();
+    } else if(animType.value==='wiggle'){
+      const s=baseScale*(1+Math.sin(t*Math.PI*4)*0.02);
+      const w=iw*s,h=ih*s,cx=cw/2,cy=ch/2,angle=Math.sin(t*Math.PI*4)*0.04;
+      ctx.save(); ctx.translate(cx,cy); ctx.rotate(angle);
+      ctx.drawImage(img,-w/2,-h/2,w,h); ctx.restore();
+    }
+    drawCaption();
+  }
+
+  function stop(){ previewPlaying=false; if(rafId) cancelAnimationFrame(rafId); rafId=null; stopBtn.disabled=true; drawStatic(); }
+
+  function preview(){
+    if(!img){alert('Upload image first');return;}
+    stop(); previewPlaying=true; startTime=performance.now();
+    const dur=parseFloat(durationEl.value)*1000;
+    function loop(now){
+      const elapsed=now-startTime,t=Math.min(1,elapsed/dur);
+      drawFrame(t);
+      if(t<1 && previewPlaying) rafId=requestAnimationFrame(loop);
+      else {previewPlaying=false; stopBtn.disabled=true;}
+    }
+    stopBtn.disabled=false; rafId=requestAnimationFrame(loop);
+  }
+
+  previewBtn.onclick=preview;
+  stopBtn.onclick=stop;
+  resetBtn.onclick=()=>{stop(); img=null; fileEl.value=''; drawStatic();};
+
+  exportBtn.onclick=async()=>{
+    if(!img){alert('Upload image first');return;}
+    const dur=parseFloat(durationEl.value)*1000;
+    const fps=parseInt(fpsEl.value);
+    const stream=canvas.captureStream(fps);
+
+    // narration
+    const audioCtx=new AudioContext();
+    const dest=audioCtx.createMediaStreamDestination();
+    stream.addTrack(dest.stream.getAudioTracks()[0]);
+
+    let recorder=new MediaRecorder(stream,{mimeType:'video/webm;codecs=vp9'});
+    let chunks=[];
+    recorder.ondataavailable=e=>{if(e.data.size>0)chunks.push(e.data);};
+    recorder.onstop=async()=>{
+      const webmBlob=new Blob(chunks,{type:'video/webm'});
+      const webmFile=new File([webmBlob],'in.webm',{type:'video/webm'});
+
+      if(!ffmpeg.isLoaded()) await ffmpeg.load();
+      ffmpeg.FS('writeFile','in.webm',await fetchFile(webmFile));
+      await ffmpeg.run('-i','in.webm','-c:v','libx264','-crf','23','-preset','ultrafast','out.mp4');
+      const data=ffmpeg.FS('readFile','out.mp4');
+      const url=URL.createObjectURL(new Blob([data.buffer],{type:'video/mp4'}));
+      const a=document.createElement('a'); a.href=url; a.download='animation.mp4';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      stop();
+    };
+    recorder.start();
+
+    // speak text
+    const utter=new SpeechSynthesisUtterance(captionEl.value);
+    speechSynthesis.speak(utter);
+
+    startTime=performance.now();
+    function recordLoop(now){
+      const elapsed=now-startTime,t=Math.min(1,elapsed/dur);
+      drawFrame(t);
+      if(t<1) rafId=requestAnimationFrame(recordLoop);
+      else setTimeout(()=>recorder.stop(),300);
+    }
+    rafId=requestAnimationFrame(recordLoop);
+  };
+
+  drawStatic();
+})();
+</script>
+</body>
+</html>
